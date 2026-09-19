@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 
 class Drone():
     """Quadrotor physics rigidbody that uses a P rate controller to fly.
@@ -14,10 +15,19 @@ class Drone():
     """
     def __init__(self):
         # drone internal variables
-        self.mass = 1
-        self.J = torch.diag(torch.tensor([0.01, 0.01, 0.018], dtype=torch.float32))  # moments of inertia
+        self.mass = 2.0
+        self.J = torch.diag(torch.tensor([0.0217, 0.0217, 0.04], dtype=torch.float32))  # moments of inertia
         self.J_inv = torch.inverse(self.J)
         self.gravity = torch.tensor([0, 0, 9.81], dtype=torch.float32)
+
+        # sim / controller params
+        self.dt = 0.02  # 50 Hz deltatime
+        self.kp = 0.2
+        self.f_max = 10  # max force on each motor allocated
+        self.max_rads = 6  # to scale body rates on
+        self.kappa = 0.015  # yaw torque per N of motor
+        self.L = 0.25  # arm length
+        self.thrusts = torch.zeros(4, dtype=torch.float32)
 
         # drone state vars
         self.xyz = torch.zeros(3, dtype=torch.float32)
@@ -25,15 +35,20 @@ class Drone():
         self.ang_vel = torch.zeros(3, dtype=torch.float32)  # w_r, w_p, w_y
         self.R = torch.eye(3, dtype=torch.float32)  # rot_mat
 
-        # sim / controller params
-        self.dt = 0.02  # 50 Hz deltatime
-        self.kp = 0.2
-        self.f_max = 7  # max force on each motor allocated
-        self.max_rads = 6  # to scale body rates on
-        self.thrusts = torch.zeros(4, dtype=torch.float32)
+        # https://cookierobotics.com/066/ explains well
+        # t, mx, my, mz where:
+        # m1 (+l, +l) = CCW || m2 (-l, -l) = CCW || m3 (+l, -l) = CW || m4 (-l, +l) = CW
+        a = self.L / 2 ** 0.5
+        self.M = torch.tensor([
+            [1, 1, 1, 1],
+            [-a, a, a, -a],
+            [a, -a, a, -a],
+            [self.kappa, self.kappa, -self.kappa, -self.kappa]
+        ], dtype=torch.float32)  # motor mixing table. Uses PX4
+        self.M_inv = torch.inverse(self.M)
 
     def __str__(self):
-        return f"v: {self.lin_vel}\nw: {self.ang_vel}\nxyz: {self.xyz}\nrpy: {self.rpy_euler}"
+        return f"v: {self.lin_vel}\nw: {self.ang_vel}\nxyz: {self.xyz}\nrpy: {self.rpy_euler}\nthrusts: {self.thrusts}"
 
     def step(self, action: torch.tensor):
         """Step once through drone dynamics model.
@@ -44,12 +59,19 @@ class Drone():
         Returns:
             wawa
         """
-        # 1: kp * ( setpoint - measured ) || 2: J^-1 (tau - w x Jw)
-        tau = self.kp * (action[1:] * self.max_rads - self.ang_vel)
-        ang_accel = self.J_inv @ (tau - torch.linalg.cross(self.ang_vel, self.J @ self.ang_vel))
+        T = self._normalize_thrust(action[0])
 
+        # translate dynamics to 4 motor thrusts with a mixer capped at f_max
+        tau = self.kp * (action[1:] * self.max_rads - self.ang_vel)  # kp * (setpoint - measured). torques from p loop
+        cmd = torch.cat([T.reshape(1), tau])
+        self.thrusts = torch.clamp(self.M_inv @ cmd, 0, self.f_max)
+        cmd = self.M @ self.thrusts
+        T, tau = cmd[0], cmd[1:]
+
+        # 2: J^-1 (tau - w x Jw)
+        ang_accel = self.J_inv @ (tau - torch.linalg.cross(self.ang_vel, self.J @ self.ang_vel))
         # v_dot = g+1/m * RF^B (force in body frame)
-        F_body = torch.tensor([0, 0, -self._normalize_thrust(action[0])])
+        F_body = torch.tensor([0, 0, -T])
         lin_accel = self.R @ F_body / self.mass + self.gravity
 
         # dynamics integration equations
@@ -110,7 +132,7 @@ if __name__ == "__main__":
 
     # pitch forward and see how drone moves
     #drone.step(torch.tensor([0.1, 0, 0.1, 0], dtype=torch.float32))
-    for i in range(10000):
-        #print(f"\n-----------\nstep: {i+1}\n-----------\n")
-        drone.step(torch.tensor([9.81, 0, 0.5, 0], dtype=torch.float32))
-    print((drone.R @ drone.R.T - torch.eye(3)).abs().max())
+    for i in range(10):
+        print(f"\n-----------\nstep: {i+1}\n-----------\n")
+        drone.step(torch.tensor([1.0, 1, 0, 0], dtype=torch.float32))
+        print(drone)
