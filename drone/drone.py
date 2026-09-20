@@ -1,5 +1,4 @@
 import torch
-import numpy as np
 
 class Drone():
     """Quadrotor physics rigidbody that uses a P rate controller to fly.
@@ -9,31 +8,32 @@ class Drone():
 
     NED (world): [+x = north, +y = east, +z = down]
     FRD (body): [+x = forward, +y = right, +z = down]
-    TODO: mixer / control allocation (arm length of rotors (L), yaw torque per N of thrust (k), motor ceiling (f_max))
-    TODO: motor dynamics (motor lag (T_m), air resistance (c_drag))
     TODO: add integral and derivative to p controller :P
     """
-    def __init__(self):
+    def __init__(self, num_envs: int = 1):
         # drone internal variables
         self.mass = 2.0
         self.J = torch.diag(torch.tensor([0.0217, 0.0217, 0.04], dtype=torch.float32))  # moments of inertia
         self.J_inv = torch.inverse(self.J)
         self.gravity = torch.tensor([0, 0, 9.81], dtype=torch.float32)
+        self.thrusts = torch.zeros((num_envs, 4), dtype=torch.float32)
 
         # sim / controller params
+        self.num_envs = num_envs
         self.dt = 0.02  # 50 Hz deltatime
-        self.kp = 0.2
         self.f_max = 10  # max force on each motor allocated
         self.max_rads = 6  # to scale body rates on
         self.kappa = 0.015  # yaw torque per N of motor
         self.L = 0.25  # arm length
-        self.thrusts = torch.zeros(4, dtype=torch.float32)
+        self.T_m = 0.03  # motor lag
+        self.c = torch.tensor([0.1, 0.1, 0.2], dtype=torch.float32)  # air resistance
+        self.kp = 0.2
 
         # drone state vars
-        self.xyz = torch.zeros(3, dtype=torch.float32)
-        self.lin_vel = torch.zeros(3, dtype=torch.float32)  # vx, vy, vz
-        self.ang_vel = torch.zeros(3, dtype=torch.float32)  # w_r, w_p, w_y
-        self.R = torch.eye(3, dtype=torch.float32)  # rot_mat
+        self.xyz = torch.zeros((num_envs, 3), dtype=torch.float32)
+        self.lin_vel = torch.zeros((num_envs, 3), dtype=torch.float32)  # vx, vy, vz
+        self.ang_vel = torch.zeros((num_envs, 3), dtype=torch.float32)  # w_r, w_p, w_y
+        self.R = torch.eye(3, dtype=torch.float32).repeat(num_envs, 1, 1)  # rot_mat
 
         # https://cookierobotics.com/066/ explains well
         # t, mx, my, mz where:
@@ -47,6 +47,8 @@ class Drone():
         ], dtype=torch.float32)  # motor mixing table. Uses PX4
         self.M_inv = torch.inverse(self.M)
 
+        self.reset()
+
     def __str__(self):
         return f"v: {self.lin_vel}\nw: {self.ang_vel}\nxyz: {self.xyz}\nrpy: {self.rpy_euler}\nthrusts: {self.thrusts}"
 
@@ -57,22 +59,26 @@ class Drone():
         Args:
             action: tensor of [collective_thrust, roll, pitch, yaw] body rates
         Returns:
-            wawa
+            drone state tuple (xyz, lin_vel, ang_vel, rot_mat)
         """
-        T = self._normalize_thrust(action[0])
+        T = self._normalize_thrust(action[:, 0])
 
         # translate dynamics to 4 motor thrusts with a mixer capped at f_max
-        tau = self.kp * (action[1:] * self.max_rads - self.ang_vel)  # kp * (setpoint - measured). torques from p loop
-        cmd = torch.cat([T.reshape(1), tau])
-        self.thrusts = torch.clamp(self.M_inv @ cmd, 0, self.f_max)
-        cmd = self.M @ self.thrusts
-        T, tau = cmd[0], cmd[1:]
+        tau = self.kp * (action[:, 1:] * self.max_rads - self.ang_vel)  # kp * (setpoint - measured). torques from p loop
+        cmd = torch.cat([T.unsqueeze(1), tau], dim=1)
+        thrust_cmd = torch.clamp(cmd @ self.M_inv.T, 0, self.f_max)
+        self.thrusts += (thrust_cmd - self.thrusts) * self.dt / self.T_m
+        cmd = self.thrusts @ self.M.T
+        T, tau = cmd[:, 0], cmd[:, 1:]
 
         # 2: J^-1 (tau - w x Jw)
-        ang_accel = self.J_inv @ (tau - torch.linalg.cross(self.ang_vel, self.J @ self.ang_vel))
-        # v_dot = g+1/m * RF^B (force in body frame)
-        F_body = torch.tensor([0, 0, -T])
-        lin_accel = self.R @ F_body / self.mass + self.gravity
+        ang_accel = (tau - torch.linalg.cross(self.ang_vel, self.ang_vel @ self.J.T, dim=-1)) @ self.J_inv.T
+        # v_dot = g+1/m * RF^B (force in body frame) then add air drag onto that
+        F_body = torch.zeros(self.num_envs, 3)
+        F_body[:, 2] = -T
+        v_body = torch.einsum('nji,nj->ni', self.R, self.lin_vel)
+        F_body -= self.c * v_body
+        lin_accel = torch.einsum('nij,nj->ni', self.R, F_body) / self.mass + self.gravity
 
         # dynamics integration equations
         self.lin_vel += lin_accel * self.dt
@@ -84,55 +90,71 @@ class Drone():
         # gram-schmidt to mitigate floating point errors
         self.R = self._orthonormalize(self.R.clone())
 
-    def reset(self):
-        self.R = torch.eye(3, dtype=torch.float32)
-        self.xyz = torch.zeros_like(self.xyz)
-        self.lin_vel = torch.zeros_like(self.lin_vel)
-        self.ang_vel = torch.zeros_like(self.ang_vel)
-        self.thrusts = torch.zeros_like(self.thrusts)
+        return self.xyz, self.lin_vel, self.ang_vel, self.R
+
+    def reset(self, i: list[int] = None):
+        """Reset drone current state, set motors to hover.
+        
+        Args:
+            i : list of indices of environments to reset
+        Returns:
+            Initial drone state (xyz, velocities, rotation matrix)
+        """
+        if i is None:
+            i = torch.arange(0, self.num_envs)
+        self.R[i] = torch.eye(3, dtype=torch.float32).repeat(len(i), 1, 1)
+        self.xyz[i] = torch.zeros_like(self.xyz[i])
+        self.lin_vel[i] = torch.zeros_like(self.lin_vel[i])
+        self.ang_vel[i] = torch.zeros_like(self.ang_vel[i])
+        self.thrusts[i] = torch.full((len(i), 4), self.mass * self.gravity[2].item() / 4)
+
+        return self.xyz, self.lin_vel, self.ang_vel, self.R
 
     def _orthonormalize(self, R):
         """Gram-Schmidt on a rotation matrix to ensure axes are orthogonal."""
         # https://www.geeksforgeeks.org/machine-learning/gram-schmidt-process-for-ml/
-        x = R[:, 0] / torch.linalg.norm(R[:, 0])
-        y = R[:, 1]
-        y -= torch.dot(x, y) * x
-        y /= torch.linalg.norm(y)
-        z = torch.linalg.cross(x, y)
-        return torch.stack([x, y, z], dim=1)
+        x = R[:, :, 0] / torch.linalg.norm(R[:, :, 0], dim=-1, keepdim=True)
+        y = R[:, :, 1]
+        y -= (x * y).sum(-1, keepdim=True) * x
+        y /= torch.linalg.norm(y, dim=-1, keepdim=True)
+        z = torch.linalg.cross(x, y, dim=-1)
+        return torch.stack([x, y, z], dim=-1)
 
     def _skew(self, v):
         """Returns a skew-symmetric matrix given (x,y,z) vals."""
         # https://www.geeksforgeeks.org/maths/what-is-symmetric-matrix-and-skew-symmetric-matrix/
-        x, y, z = v
-        return torch.tensor(
-            [[0, -z, y],
-            [z, 0, -x],
-            [-y, x, 0]],
-            dtype=torch.float32
-        )
+        x, y, z = v[:, 0], v[:, 1], v[:, 2]
+        o = torch.zeros_like(x)
+        return torch.stack([
+            torch.stack([o, -z, y], -1),
+            torch.stack([z, o, -x], -1),
+            torch.stack([-y, x, o], -1),
+        ], dim=-2)
 
-    def _normalize_thrust(self, t: float):
+    def _normalize_thrust(self, t: torch.tensor):
         """Normalize thrust of 4 motors"""
         return t * (4 * self.f_max)
 
     @property
     def rpy_euler(self):
-        r = torch.atan2(self.R[2, 1], self.R[2, 2])
-        p = torch.atan2(-self.R[2, 0], torch.sqrt(self.R[2,1]**2 + self.R[2,2]**2))
-        y = torch.atan2(self.R[1,0], self.R[0,0])
+        r = torch.atan2(self.R[:, 2, 1], self.R[:, 2, 2])
+        p = torch.atan2(-self.R[:, 2, 0], torch.sqrt(self.R[:,2,1]**2 + self.R[:,2,2]**2))
+        y = torch.atan2(self.R[:,1,0], self.R[:,0,0])
         return r, p, y
 
 if __name__ == "__main__":
-    drone = Drone()
+    drone = Drone(num_envs=2)
 
     # see init drone
-    drone.step(torch.zeros(4, dtype=torch.float32))
+    drone.step(torch.zeros((2, 4), dtype=torch.float32))
     print(drone)
 
     # pitch forward and see how drone moves
     #drone.step(torch.tensor([0.1, 0, 0.1, 0], dtype=torch.float32))
     for i in range(10):
         print(f"\n-----------\nstep: {i+1}\n-----------\n")
-        drone.step(torch.tensor([1.0, 1, 0, 0], dtype=torch.float32))
+        drone.step(torch.tensor([[0.49, 0, 0, 0], [0.49, 0, 0, 0]], dtype=torch.float32))
         print(drone)
+
+    states = drone.reset()
+    print(states)
