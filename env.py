@@ -2,7 +2,6 @@ from stable_baselines3.common.vec_env import VecEnv
 from gymnasium import spaces
 from drone.drone import Drone
 import numpy as np
-from stable_baselines3 import PPO
 import torch
 
 class DroneEnv(VecEnv):
@@ -17,7 +16,7 @@ class DroneEnv(VecEnv):
         self.obs_size = 22
         self.acts_size = 4
         self.num_envs = num_envs
-        self.ep_limit = 2400
+        self.ep_limit = 500
 
         self._obs = np.zeros((self.num_envs, self.obs_size), dtype=np.float32)
 
@@ -43,6 +42,7 @@ class DroneEnv(VecEnv):
 
         ### STATE VARIABLES ###
         self._done = np.zeros((self.num_envs,), dtype=bool)
+        self._done_reason = ["" for _ in range(self.num_envs)]
         self._cur_waypoint = np.zeros((self.num_envs,), dtype=np.int16)
         self._waypoints = np.zeros((self.num_envs, 3), dtype=np.float32) # change later to be dynamic to add whatever waypoints
         self._prev_action = np.zeros((self.num_envs, self.acts_size), dtype=np.float32)
@@ -60,6 +60,11 @@ class DroneEnv(VecEnv):
         self._prev_action = action.copy()
 
         info = [{} for _ in range(self.num_envs)]
+        info[self._done]["terminal_observation"] = self._obs.copy()
+        for i in range(self.num_envs):
+            self._rewards[i].append(self._reward[i])
+
+        self.reset(np.where(self._done)[0])
 
         return self._obs.copy(), self._reward.copy(), \
             self._done.copy(), info
@@ -72,6 +77,8 @@ class DroneEnv(VecEnv):
 
         self._prev_action[i] = 0
         self._done[i] = np.zeros_like(self._done[i])
+        for k in i:
+            self._rewards[k] = []
 
         # temp for hover tests
         self._cur_waypoint[i] = np.zeros_like(self._cur_waypoint[i])
@@ -82,11 +89,24 @@ class DroneEnv(VecEnv):
         return self._obs.copy()
 
     def _compute_reward(self, action: np.ndarray):
-        self._reward = (
-            -np.linalg.norm(self._waypoints - self._obs[:, 0:3], axis=1) +
-            -0.1 * np.linalg.norm(self._obs[:, 12:15], axis=1) +
-            -0.05 * np.linalg.norm(self._obs[:, 15:18], axis=1) +
-            -0.01 * np.linalg.norm(action - self._prev_action, axis=1) +
+        ### termination clauses ###
+        # episode limit reached
+        ep_lens = np.array([len(self._rewards[i]) for i in range(self.num_envs)], dtype=np.int16)
+        self._done[ep_lens == self.ep_limit] = True
+        self._done_reason[self._done] = "TimeLimit.truncated"
+
+        # if drone hits ground (z > 0 since ned)
+        self._done[self._obs[:, 2] > 0] = True
+        self._done_reason[self._done] = "terminated"
+
+        # temp reward for done and not terminated at episode length, since for hover its gonna time out.
+        self._reward[self._done & (ep_lens != self.ep_limit)] = -10
+        self._reward[self._done & (ep_lens == self.ep_limit)] = 10
+        self._reward[~self._done] = (
+            -np.linalg.norm(self._waypoints[~self._done] - self._obs[~self._done, 0:3], axis=1) +
+            -0.1 * np.linalg.norm(self._obs[~self._done, 12:15], axis=1) +
+            -0.05 * np.linalg.norm(self._obs[~self._done, 15:18], axis=1) +
+            -0.01 * np.linalg.norm(action[~self._done] - self._prev_action[~self._done], axis=1) +
             1.0
         )
 
