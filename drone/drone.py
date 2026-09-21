@@ -1,4 +1,5 @@
 import torch
+import math
 
 class Drone():
     """Quadrotor physics rigidbody that uses a P rate controller to fly.
@@ -26,6 +27,7 @@ class Drone():
         self.kappa = 0.015  # yaw torque per N of motor
         self.L = 0.25  # arm length
         self.T_m = 0.03  # motor lag
+        self.alpha = 1 - math.exp(-self.dt / self.T_m)  # per-step gain for first-order lag
         self.c = torch.tensor([0.1, 0.1, 0.2], dtype=torch.float32)  # air resistance
         self.kp = 0.2
 
@@ -67,7 +69,8 @@ class Drone():
         tau = self.kp * (action[:, 1:] * self.max_rads - self.ang_vel)  # kp * (setpoint - measured). torques from p loop
         cmd = torch.cat([T.unsqueeze(1), tau], dim=1)
         thrust_cmd = torch.clamp(cmd @ self.M_inv.T, 0, self.f_max)
-        self.thrusts += (thrust_cmd - self.thrusts) * self.dt / self.T_m
+        # exact w/alpha rather than approximating the step time
+        self.thrusts += self.alpha * (thrust_cmd - self.thrusts)
         cmd = self.thrusts @ self.M.T
         T, tau = cmd[:, 0], cmd[:, 1:]
 
