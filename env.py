@@ -51,6 +51,13 @@ class DroneEnv(VecEnv):
         self.reset()
 
     def step(self, action: np.ndarray):
+        """Computes step of quadrotor in the environment.
+
+        Args:
+            action: [normalized_thrust, roll, pitch, yaw body rates]
+        Returns:
+            observation, reward, done, env information
+        """
         # xyz, lin_vel, ang_vel, R
         drone_state = self.wrapper.step(torch.as_tensor(action))
 
@@ -60,9 +67,15 @@ class DroneEnv(VecEnv):
         self._prev_action = action.copy()
 
         info = [{} for _ in range(self.num_envs)]
-        info[self._done]["terminal_observation"] = self._obs.copy()
         for i in range(self.num_envs):
             self._rewards[i].append(self._reward[i])
+
+        ### set info data to return ###
+        for k in np.where(self._done)[0]:
+            # terminal observations -- first 2 are for PPO algo to use.
+            info[k]["terminal_observation"] = self._obs[k].copy()
+            info[k]["TimeLimit.truncated"] = self._done_reason[k] == "TimeLimit.truncated"
+            info[k]["termination_reason"] = self._done_reason[k]
 
         self.reset(np.where(self._done)[0])
 
@@ -92,12 +105,16 @@ class DroneEnv(VecEnv):
         ### termination clauses ###
         # episode limit reached
         ep_lens = np.array([len(self._rewards[i]) for i in range(self.num_envs)], dtype=np.int16)
-        self._done[ep_lens == self.ep_limit] = True
-        self._done_reason[self._done] = "TimeLimit.truncated"
+        timeout = ep_lens+1 == self.ep_limit
+        self._done[timeout] = True
+        for k in np.where(timeout)[0]:
+            self._done_reason[k] = "TimeLimit.truncated"
 
         # if drone hits ground (z > 0 since ned)
-        self._done[self._obs[:, 2] > 0] = True
-        self._done_reason[self._done] = "terminated"
+        crashed = self._obs[:, 2] > 0
+        self._done[crashed] = True
+        for k in np.where(crashed)[0]:
+            self._done_reason[k] = "terminated"
 
         # temp reward for done and not terminated at episode length, since for hover its gonna time out.
         self._reward[self._done & (ep_lens != self.ep_limit)] = -10
@@ -151,3 +168,7 @@ class DroneEnv(VecEnv):
 
     def close(self):
         print("closed")
+
+    @property
+    def render_mode(self):
+        return None
