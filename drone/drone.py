@@ -2,14 +2,18 @@ import torch
 import math
 
 class Drone():
-    """Quadrotor physics rigidbody that uses a P rate controller to fly.
+    """Batched Quadrotor rigidbody simulator that uses a PID rate controller to fly.
 
-    Uses NED conversion for world frame, and FRD for body frame. Rates are tracked
-    by a P-controller so first-order lag is inherent.
+    Uses NED conversion for world frame, and FRD for body frame.
+
+    Rates [-1, 1] scaled by max rads. Tracked with the PID loop, feeding Euler's
+    rotational equation; thrust [0, 1] is feedforward. Matches PX4's design of a X500 holybro quadrotor.
+
+    Integration is semi-implicit Euler at 50 Hz. Motor lag is closed-form; attitude is a rotation
+    matrix reorthonormalized each timestep.
 
     NED (world): [+x = north, +y = east, +z = down]
     FRD (body): [+x = forward, +y = right, +z = down]
-    TODO: add integral and derivative to p controller :P
     """
     def __init__(self, num_envs: int = 1):
         # drone internal variables
@@ -29,13 +33,18 @@ class Drone():
         self.T_m = 0.03  # motor lag
         self.alpha = 1 - math.exp(-self.dt / self.T_m)  # per-step gain for first-order lag
         self.c = torch.tensor([0.1, 0.1, 0.2], dtype=torch.float32)  # air resistance
-        self.kp = 0.2
+        self.kp = 0.15
+        self.ki = 0.01
+        self.kd = 0.003
+        self.int_limit = 0.1  # torque limit
 
         # drone state vars
         self.xyz = torch.zeros((num_envs, 3), dtype=torch.float32)
         self.lin_vel = torch.zeros((num_envs, 3), dtype=torch.float32)  # vx, vy, vz
         self.ang_vel = torch.zeros((num_envs, 3), dtype=torch.float32)  # w_r, w_p, w_y
         self.R = torch.eye(3, dtype=torch.float32).repeat(num_envs, 1, 1)  # rot_mat
+        self.prev_ang_vel = torch.zeros((num_envs, 3), dtype=torch.float32)
+        self.rate_int = torch.zeros((num_envs, 3), dtype=torch.float32)
 
         # https://cookierobotics.com/066/ explains well
         # t, mx, my, mz where:
@@ -65,8 +74,17 @@ class Drone():
         """
         T = self._normalize_thrust(action[:, 0])
 
+        # compute value from pid controller
+        # kp * (setpoint - measured). torques from pid loop
+        # ki * cur + error * deltatime
+        # kd (measured - previous) / deltatime. dampening
+        err = action[:, 1:] * self.max_rads - self.ang_vel
+        self.rate_int = torch.clamp(self.rate_int + err * self.dt, -self.int_limit, self.int_limit)
+        d = (self.ang_vel - self.prev_ang_vel) / self.dt
+        tau = self.kp * err + self.ki * self.rate_int - self.kd * d  
+        self.prev_ang_vel = self.ang_vel.clone()
+
         # translate dynamics to 4 motor thrusts with a mixer capped at f_max
-        tau = self.kp * (action[:, 1:] * self.max_rads - self.ang_vel)  # kp * (setpoint - measured). torques from p loop
         cmd = torch.cat([T.unsqueeze(1), tau], dim=1)
         thrust_cmd = torch.clamp(cmd @ self.M_inv.T, 0, self.f_max)
         # exact w/alpha rather than approximating the step time
@@ -110,6 +128,8 @@ class Drone():
         self.lin_vel[i] = torch.zeros_like(self.lin_vel[i])
         self.ang_vel[i] = torch.zeros_like(self.ang_vel[i])
         self.thrusts[i] = torch.full((len(i), 4), self.mass * self.gravity[2].item() / 4)
+        self.prev_ang_vel[i] = torch.zeros_like(self.prev_ang_vel[i])
+        self.rate_int[i] = torch.zeros_like(self.rate_int[i])
 
         return self.xyz, self.lin_vel, self.ang_vel, self.R
 
