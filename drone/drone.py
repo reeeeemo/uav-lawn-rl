@@ -156,7 +156,7 @@ class Drone():
 
     def _normalize_thrust(self, t: torch.tensor):
         """Normalize thrust of 4 motors"""
-        return t * (4 * self.f_max)
+        return (t+1) * 0.5 * (4 * self.f_max)
 
     @property
     def rpy_euler(self):

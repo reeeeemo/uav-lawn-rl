@@ -114,7 +114,7 @@ class DroneEnv(VecEnv):
             self._done_reason[k] = "TimeLimit.truncated"
 
         # if drone hits ground (z > 0 since ned)
-        crashed = self._obs[:, 2] > 0
+        crashed = self._obs[:, 2] > 0.1
         self._done[crashed] = True
         for k in np.where(crashed)[0]:
             self._done_reason[k] = "terminated"
