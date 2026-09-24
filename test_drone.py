@@ -36,10 +36,7 @@ def run_rollouts(model, env, save_path: Path, n_rollouts: int = 10):
             act, _ = model.predict(obs, deterministic=True)
             obs, rew ,done, infos = env.step(act)
 
-            traj[ep_len] = (
-                infos[0]["terminal_observation"][0:3] if done[0] 
-                else env.drone_pos[0]
-            )
+            traj[ep_len] = env.drone_pos[0]
             ep_len += 1
             total_rew += rew
 
