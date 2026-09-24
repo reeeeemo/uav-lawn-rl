@@ -19,6 +19,7 @@ class DroneEnv(VecEnv):
         self.ep_limit = 500
 
         self._obs = np.zeros((self.num_envs, self.obs_size), dtype=np.float32)
+        self._drone_pos = np.zeros((self.num_envs, 3), dtype=np.float32)
 
         # [x_near_post, y_near_post, z_near_post]
         # 9d rot mat for [roll pitch yaw]
@@ -44,7 +45,7 @@ class DroneEnv(VecEnv):
         self._done = np.zeros((self.num_envs,), dtype=bool)
         self._done_reason = ["" for _ in range(self.num_envs)]
         self._cur_waypoint = np.zeros((self.num_envs,), dtype=np.int16)
-        self._waypoints = np.zeros((self.num_envs, 3), dtype=np.float32) # change later to be dynamic to add whatever waypoints
+        self._waypoints = np.zeros((1, 3), dtype=np.float32) # change later to be dynamic to add whatever waypoints
         self._prev_action = np.zeros((self.num_envs, self.acts_size), dtype=np.float32)
         self._cur_episodes = np.zeros((self.num_envs,), dtype=np.int16)
 
@@ -78,6 +79,10 @@ class DroneEnv(VecEnv):
             info[k]["terminal_observation"] = self._obs[k].copy()
             info[k]["TimeLimit.truncated"] = self._done_reason[k] == "TimeLimit.truncated"
             info[k]["termination_reason"] = self._done_reason[k]
+            info[k]["episode"] = {
+                "r": float(np.sum(self._rewards[k])),
+                "l": len(self._rewards[k])
+            }
 
         done_arr = self._done.copy()
         self.reset(np.where(self._done)[0])
@@ -98,7 +103,6 @@ class DroneEnv(VecEnv):
 
         # temp for hover tests
         self._cur_waypoint[i] = np.zeros_like(self._cur_waypoint[i])
-        self._waypoints[i] = np.full_like(self._waypoints[i], [0, 0, -5.0])
 
         self._compute_observations(np.zeros((len(i), 4), dtype=np.float32), drone_state)
 
@@ -114,7 +118,7 @@ class DroneEnv(VecEnv):
             self._done_reason[k] = "TimeLimit.truncated"
 
         # if drone hits ground (z > 0 since ned)
-        crashed = self._obs[:, 2] > 0.1
+        crashed = self.drone_pos[:, 2] > 0.1
         self._done[crashed] = True
         for k in np.where(crashed)[0]:
             self._done_reason[k] = "terminated"
@@ -123,9 +127,9 @@ class DroneEnv(VecEnv):
         self._reward[self._done & ~timeout] = -10
         self._reward[self._done & timeout] = 10
         self._reward[~self._done] = (
-            -np.linalg.norm(self._waypoints[~self._done] - self._obs[~self._done, 0:3], axis=1) +
-            -0.1 * np.linalg.norm(self._obs[~self._done, 12:15], axis=1) +
-            -0.05 * np.linalg.norm(self._obs[~self._done, 15:18], axis=1) +
+            -1 * np.sum(self._obs[~self._done, 0:3]**2, axis=1)
+            -0.001 * np.linalg.norm(self._obs[~self._done, 12:15], axis=1) +
+            -0.001 * np.linalg.norm(self._obs[~self._done, 15:18], axis=1) +
             -0.01 * np.linalg.norm(action[~self._done] - self._prev_action[~self._done], axis=1) +
             1.0
         )
@@ -141,7 +145,8 @@ class DroneEnv(VecEnv):
             i = np.arange(0, self.num_envs)
         xyz, lin_vel, ang_vel, R  = drone_state
         # dunno what im gonna do here yet....
-        self._obs[i, 0:3] = xyz.numpy()[i]  # temp for now since this is global and bad
+        self._drone_pos[i] = xyz.numpy()[i]
+        self._obs[i, 0:3] = self._waypoints[self._cur_waypoint[i]] - self._drone_pos[i]
         self._obs[i, 3:12] = R.reshape(-1, 9).numpy()[i]
         self._obs[i, 12:15] = lin_vel.numpy()[i]
         self._obs[i, 15:18] = ang_vel.numpy()[i]
@@ -178,4 +183,4 @@ class DroneEnv(VecEnv):
 
     @property
     def drone_pos(self):
-        return self._obs[:, 0:3].copy()
+        return self._drone_pos.copy()
