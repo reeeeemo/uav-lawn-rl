@@ -45,7 +45,8 @@ class DroneEnv(VecEnv):
         self._done = np.zeros((self.num_envs,), dtype=bool)
         self._done_reason = ["" for _ in range(self.num_envs)]
         self._cur_waypoint = np.zeros((self.num_envs,), dtype=np.int16)
-        self._waypoints = np.zeros((1, 3), dtype=np.float32) # change later to be dynamic to add whatever waypoints
+        self._waypoints = np.array([[0.0, 0.0, -5.0]], dtype=np.float32)
+        #np.zeros((1, 3), dtype=np.float32) # change later to be dynamic to add whatever waypoints
         self._prev_action = np.zeros((self.num_envs, self.acts_size), dtype=np.float32)
         self._cur_episodes = np.zeros((self.num_envs,), dtype=np.int16)
 

@@ -16,14 +16,14 @@ class Drone():
     FRD (body): [+x = forward, +y = right, +z = down]
     """
     def __init__(self, num_envs: int = 1):
-        # drone internal variables
+        ### drone internal variables ###
         self.mass = 2.0
         self.J = torch.diag(torch.tensor([0.0217, 0.0217, 0.04], dtype=torch.float32))  # moments of inertia
         self.J_inv = torch.inverse(self.J)
         self.gravity = torch.tensor([0, 0, 9.81], dtype=torch.float32)
         self.thrusts = torch.zeros((num_envs, 4), dtype=torch.float32)
 
-        # sim / controller params
+        ### sim / controller params ###
         self.num_envs = num_envs
         self.dt = 0.02  # 50 Hz deltatime
         self.f_max = 10  # max force on each motor allocated
@@ -38,7 +38,7 @@ class Drone():
         self.kd = 0.003
         self.int_limit = 0.1  # torque limit
 
-        # drone state vars
+        ### drone state vars ###
         self.xyz = torch.zeros((num_envs, 3), dtype=torch.float32)
         self.lin_vel = torch.zeros((num_envs, 3), dtype=torch.float32)  # vx, vy, vz
         self.ang_vel = torch.zeros((num_envs, 3), dtype=torch.float32)  # w_r, w_p, w_y
@@ -46,6 +46,7 @@ class Drone():
         self.prev_ang_vel = torch.zeros((num_envs, 3), dtype=torch.float32)
         self.rate_int = torch.zeros((num_envs, 3), dtype=torch.float32)
 
+        ### motor mixing table. Uses PX4's version of the X500 Holybro ###
         # https://cookierobotics.com/066/ explains well
         # t, mx, my, mz where:
         # m1 (+l, +l) = CCW || m2 (-l, -l) = CCW || m3 (+l, -l) = CW || m4 (-l, +l) = CW
@@ -55,7 +56,7 @@ class Drone():
             [-a, a, a, -a],
             [a, -a, a, -a],
             [self.kappa, self.kappa, -self.kappa, -self.kappa]
-        ], dtype=torch.float32)  # motor mixing table. Uses PX4
+        ], dtype=torch.float32)
         self.M_inv = torch.inverse(self.M)
 
         self.reset()
@@ -132,6 +133,10 @@ class Drone():
         self.rate_int[i] = torch.zeros_like(self.rate_int[i])
 
         return self.xyz, self.lin_vel, self.ang_vel, self.R
+
+    def randomize(self):
+        """Randomizes drone state variables"""
+        pass
 
     def _orthonormalize(self, R):
         """Gram-Schmidt on a rotation matrix to ensure axes are orthogonal."""
