@@ -7,7 +7,7 @@ import torch
 import uuid
 from glob import glob
 
-from env import DroneEnv
+from environment.env import DroneEnv
 from drone.drone_logger import DroneLogger
 
 def get_args():

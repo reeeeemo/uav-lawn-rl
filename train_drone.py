@@ -6,7 +6,7 @@ from pathlib import Path
 import torch
 import uuid
 
-from env import DroneEnv
+from environment.env import DroneEnv
 
 TOTAL_TIMESTEPS = int(2e7)
 
