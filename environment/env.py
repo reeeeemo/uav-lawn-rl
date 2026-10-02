@@ -78,6 +78,7 @@ class DroneEnv(VecEnv):
         for k in np.where(self._done)[0]:
             # terminal observations -- first 2 are for PPO algo to use.
             info[k]["terminal_observation"] = self._obs[k].copy()
+            info[k]["terminal_global_observation"] = self._drone_pos[k].copy()
             info[k]["TimeLimit.truncated"] = self._done_reason[k] == "TimeLimit.truncated"
             info[k]["termination_reason"] = self._done_reason[k]
             info[k]["episode"] = {
@@ -128,7 +129,7 @@ class DroneEnv(VecEnv):
         self._reward[self._done & ~timeout] = -10
         self._reward[self._done & timeout] = 10
         self._reward[~self._done] = (
-            -1 * np.sum(self._obs[~self._done, 0:3]**2, axis=1)
+            -0.1 * np.linalg.norm(self._obs[~self._done, 0:3], axis=1)
             -0.001 * np.linalg.norm(self._obs[~self._done, 12:15], axis=1) +
             -0.001 * np.linalg.norm(self._obs[~self._done, 15:18], axis=1) +
             -0.01 * np.linalg.norm(action[~self._done] - self._prev_action[~self._done], axis=1) +
