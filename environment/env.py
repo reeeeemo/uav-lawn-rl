@@ -21,11 +21,11 @@ class DroneEnv(VecEnv):
         self._obs = np.zeros((self.num_envs, self.obs_size), dtype=np.float32)
         self._drone_pos = np.zeros((self.num_envs, 3), dtype=np.float32)
 
-        # [x_near_post, y_near_post, z_near_post]
+        # [x_near_cell, y_near_cell, z_near_cell]
         # 9d rot mat for [roll pitch yaw]
         # [x_vel, y_vel, z_vel]
         # [roll_vel, pitch_vel, yaw_vel]
-        # [prev_thrust, prev_pitch, prev_yaw, prev_roll]
+        # [prev_thrust, prev_roll, prev_pitch, prev_yaw]
         self.observation_space = spaces.Box(
             np.ones(self.obs_size) * -np.inf,
             np.ones(self.obs_size) * np.inf, dtype=np.float32
@@ -48,9 +48,12 @@ class DroneEnv(VecEnv):
         self._waypoints = np.array([[0.0, 0.0, -5.0]], dtype=np.float32)
         #np.zeros((1, 3), dtype=np.float32) # change later to be dynamic to add whatever waypoints
         self._prev_action = np.zeros((self.num_envs, self.acts_size), dtype=np.float32)
+        self._prev_dist = np.zeros((self.num_envs,), dtype=np.float32)
         self._cur_episodes = np.zeros((self.num_envs,), dtype=np.int16)
 
+
         self.sim_dt = self.wrapper.dt
+        self.gamma = 0.99
 
         self.reset()
 
@@ -128,8 +131,15 @@ class DroneEnv(VecEnv):
         # temp reward for done and not terminated at episode length, since for hover its gonna time out.
         self._reward[self._done & ~timeout] = -10
         self._reward[self._done & timeout] = 10
+
+        # per-timestep reward, distance uses potential-based reward shaping
+        # distance towards closest cell is merely a guideline for navigating cells
+        # note that the main reward stems from maximizing certainty in a cell.
+        # https://arxiv.org/pdf/2402.07411
+        dist = np.linalg.norm(self._obs[:, 0:3], axis=1)
         self._reward[~self._done] = (
-            -0.1 * np.linalg.norm(self._obs[~self._done, 0:3], axis=1)
+            0.1 * (self._prev_dist[~self._done] - self.gamma * dist[~self._done]) +
+            #-0.1 * np.linalg.norm(self._obs[~self._done, 0:3], axis=1)
             -0.001 * np.linalg.norm(self._obs[~self._done, 12:15], axis=1) +
             -0.001 * np.linalg.norm(self._obs[~self._done, 15:18], axis=1) +
             -0.01 * np.linalg.norm(action[~self._done] - self._prev_action[~self._done], axis=1) +
@@ -145,6 +155,8 @@ class DroneEnv(VecEnv):
         """
         if i is None:
             i = np.arange(0, self.num_envs)
+
+        self._prev_dist[i] = np.linalg.norm(self._obs[i, 0:3], axis=1)
         xyz, lin_vel, ang_vel, R  = drone_state
         # dunno what im gonna do here yet....
         self._drone_pos[i] = xyz.numpy()[i]
