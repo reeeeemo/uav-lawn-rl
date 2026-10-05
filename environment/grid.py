@@ -2,6 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.path import Path
 from matplotlib.transforms import Bbox
+from utils.filter import CertaintyKalmanFilter
 
 class Grid:
     """
@@ -27,7 +28,7 @@ class Grid:
 
         # generate cells, cells inside the polygon, uncertainty values #
         self.cells = np.vstack([Y.ravel(), X.ravel()])  # lower left corner of each cell
-        self.certainties = np.zeros((self.n_rows, self.n_cols), dtype=np.float32)
+        self.filter = CertaintyKalmanFilter((self.n_rows, self.n_cols), R=0.5)
 
         self.polygon_path = Path(self.polygon)
         self.inside_cells = np.array([
@@ -48,6 +49,16 @@ class Grid:
                 if self.polygon_path.contains_point((rand_x, rand_y)):
                     break
             self.objects.append([obj_type, (rand_x, rand_y)])
+            
+    def update_certainties(self, rows, cols, detected: int):
+        return self.filter.step(rows, cols, detected)
+    
+    def get_cur_cell(self, x, y):
+        col = int((x - self.xmin) // self.cell_size)
+        row = int((y - self.ymin) // self.cell_size)
+        if not (0 <= row < self.n_rows and 0 <= col < self.n_cols):
+            return None
+        return row, col
 
     def plot(self):
         """Showcase a plotted figure of grid, polygon, and placed objects w/certainty principle."""
@@ -65,7 +76,9 @@ class Grid:
             plt.plot(*xy, marker='o', color=obj_color, linestyle='none')
         plt.show(block=True)
 
-    #def update_certainties(self, cell)
+    @property
+    def certainties(self):
+        return self.filter.x
 
 if __name__ == "__main__":
     grid = Grid(np.array([[0,0],[30,5],[25,20],[5,15]], dtype=np.float32))
