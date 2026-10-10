@@ -10,6 +10,7 @@ class Grid:
     """
     def __init__(self, polygon: np.ndarray):
         self.objects = []
+        self._obj_xy = np.empty((0, 2), dtype=np.float32)
         self.cell_size = 3
 
         ### create fishnet grid of polygon ###
@@ -25,6 +26,8 @@ class Grid:
             self.xmin + np.arange(self.n_cols) * self.cell_size,
             self.ymin + np.arange(self.n_rows) * self.cell_size, indexing='xy'
         )
+        self.cell_cx = X + self.cell_size / 2
+        self.cell_cy = Y + self.cell_size / 2
 
         # generate cells, cells inside the polygon, uncertainty values #
         self.cells = np.vstack([Y.ravel(), X.ravel()])  # lower left corner of each cell
@@ -36,10 +39,11 @@ class Grid:
             for x, y in zip(X.ravel(), Y.ravel())
         ]).reshape(self.n_rows, self.n_cols)
 
-        self._generate_objects("tree", 25)
-        self._generate_objects("rock", 15)
+    def reset(self):
+        self.filter.reset()
+        self.objects = []
 
-    def _generate_objects(self, obj_type: str, num_objs: int):
+    def generate_objects(self, obj_type: str, num_objs: int):
         """Generates object type within the polygon boundaries."""
         for _ in range(num_objs):
             while True:
@@ -49,16 +53,17 @@ class Grid:
                 if self.polygon_path.contains_point((rand_x, rand_y)):
                     break
             self.objects.append([obj_type, (rand_x, rand_y)])
+        self._obj_xy = np.array([xy for _, xy in self.objects], dtype=np.float32)
             
-    def update_certainties(self, rows, cols, detected: int):
-        return self.filter.step(rows, cols, detected)
+    def update_certainties(self, rows, cols, detected: int, noise=None):
+        return self.filter.step(rows, cols, detected, R=noise)
     
     def get_cur_cell(self, x, y):
-        col = int((x - self.xmin) // self.cell_size)
-        row = int((y - self.ymin) // self.cell_size)
-        if not (0 <= row < self.n_rows and 0 <= col < self.n_cols):
-            return None
-        return row, col
+        x, y = np.atleast_1d(x), np.atleast_1d(y)
+        cols = ((x - self.xmin) // self.cell_size).astype(int)
+        rows = ((y - self.ymin) // self.cell_size).astype(int)
+        valid = (rows >= 0) & (rows < self.n_rows) & (cols >= 0) & (cols < self.n_cols)
+        return rows, cols, valid
 
     def plot(self):
         """Showcase a plotted figure of grid, polygon, and placed objects w/certainty principle."""
@@ -79,6 +84,14 @@ class Grid:
     @property
     def certainties(self):
         return self.filter.x
+    
+    @property
+    def confidence(self):
+        return 1 - self.filter.P  # 0: no evidence, 1 otherwise
+    
+    @property
+    def obj_xy(self):
+        return self._obj_xy
 
 if __name__ == "__main__":
     grid = Grid(np.array([[0,0],[30,5],[25,20],[5,15]], dtype=np.float32))

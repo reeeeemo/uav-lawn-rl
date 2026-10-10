@@ -114,7 +114,7 @@ class Drone():
 
         return self.xyz, self.lin_vel, self.ang_vel, self.R
 
-    def reset(self, i: list[int] = None):
+    def reset(self, i: list[int] = None, randomize: bool = False):
         """Reset drone current state, set motors to hover.
         
         Args:
@@ -132,11 +132,25 @@ class Drone():
         self.prev_ang_vel[i] = torch.zeros_like(self.prev_ang_vel[i])
         self.rate_int[i] = torch.zeros_like(self.rate_int[i])
 
+        if randomize:
+            self._randomize(i)
         return self.xyz, self.lin_vel, self.ang_vel, self.R
 
-    def randomize(self):
+    def _randomize(self, i: list[int] = None):
         """Randomizes drone state variables"""
-        pass
+        if i is None:
+            i = torch.arange(0, self.num_envs)
+        n = len(i)
+        self.xyz[i, :2] = torch.empty(n, 2).uniform_(-5.0, 5.0)
+        self.xyz[i, 2] = 0.0
+        
+        psi = torch.empty(n).uniform_(0.0, 2 * torch.pi)
+        c, s = torch.cos(psi), torch.sin(psi)
+        R = torch.zeros(n, 3, 3, dtype=torch.float32)
+        R[:, 0, 0], R[:, 0, 1] = c, -s
+        R[:, 1, 0], R[:, 1, 1] = s, c
+        R[:, 2, 2] = 1.0
+        self.R[i] = R
 
     def _orthonormalize(self, R):
         """Gram-Schmidt on a rotation matrix to ensure axes are orthogonal."""

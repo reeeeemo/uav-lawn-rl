@@ -8,7 +8,7 @@ import uuid
 
 from environment.env import DroneEnv
 
-TOTAL_TIMESTEPS = int(2e7)
+TOTAL_TIMESTEPS = int(6e7)
 
 def get_args():
     parser = argparse.ArgumentParser()
@@ -31,7 +31,7 @@ def main():
     dir_path = Path(__file__).resolve().parent / args.save_dir / str(uuid.uuid4())
     dir_path.mkdir(parents=True, exist_ok=True)
 
-    env = VecNormalize(DroneEnv(args.envs))
+    env = VecNormalize(DroneEnv(np.array([[0,0],[58,8],[52,42],[6,34]], dtype=np.float32), args.envs))
 
     model = PPO(
         tensorboard_log=str(dir_path),
@@ -40,7 +40,7 @@ def main():
                            net_arch=dict(pi=[64,64], vf=[64,64])),
         env=env,
         gae_lambda=0.95,
-        gamma=0.99,
+        gamma=0.999,
         n_steps=2048,
         ent_coef=0.003,
         learning_rate=1e-4,
