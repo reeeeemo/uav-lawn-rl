@@ -11,7 +11,7 @@ class DroneEnv(VecEnv):
 
     Allows for multiple environments.
     """
-    def __init__(self, init_polygon: np.ndarray, num_envs: int = 10):
+    def __init__(self, init_polygon: np.ndarray, num_envs: int = 10, num_objs: int = 40):
         self.wrapper = Drone(num_envs)
 
         ### PPO OBS / ACTION VARS ###
@@ -19,6 +19,7 @@ class DroneEnv(VecEnv):
         self.acts_size = 4
         self.num_envs = num_envs
         self.ep_limit = 1500
+        self.num_objs = num_objs
 
         self._obs = np.zeros((self.num_envs, self.obs_size), dtype=np.float32)
         self._drone_pos = np.zeros((self.num_envs, 3), dtype=np.float32)
@@ -54,14 +55,16 @@ class DroneEnv(VecEnv):
         self._prev_dist = np.zeros((self.num_envs,), dtype=np.float32)
         self._cur_episodes = np.zeros((self.num_envs,), dtype=np.int16)
         self._info_gain = np.zeros(self.num_envs, dtype=np.float32)
+        self._confs = [None] * self.num_envs
+        self._visible_objs = np.zeros((self.num_envs, self.num_objs), dtype=bool)
 
         # setup grid environment
         self.survey_alt = 5  # altitude to stay at when surveying
         self._grids = [Grid(polygon=init_polygon) for _ in range(self.num_envs)]
         self._cur_cell = np.zeros((self.num_envs, 3), dtype=np.float32)
         for i, g in enumerate(self._grids):
-            g.generate_objects("tree", 25)
-            g.generate_objects("rock", 15)
+            g.generate_objects("tree", self.num_objs//2)
+            g.generate_objects("rock", self.num_objs//2)
             self._cur_cell[i] = np.append(g.polygon.min(axis=0), -self.survey_alt)
 
         self._cameras = [Camera() for _ in range(self.num_envs)]
@@ -102,6 +105,7 @@ class DroneEnv(VecEnv):
                 "r": float(np.sum(self._rewards[k])),
                 "l": len(self._rewards[k])
             }
+            info[k]["terminal_confidence"] = self._grids[k].confidence.copy()
 
         done_arr = self._done.copy()
         self.reset(np.where(self._done)[0])
@@ -113,6 +117,8 @@ class DroneEnv(VecEnv):
         """Resets drone. Takes in a list of indices of envs to reset."""
         if i is None:
             i = np.arange(0, self.num_envs)
+        elif len(i) == 0:
+            return
         drone_state = self.wrapper.reset(i, randomize=True)
 
         self._prev_action[i] = 0
@@ -126,7 +132,8 @@ class DroneEnv(VecEnv):
         
         self._k_obstacles[i] = 0
         self._k_confidence_cells[i] = 0
-        self._compute_observations(np.zeros((len(i), 4), dtype=np.float32), drone_state)
+        self._update_detections_grid(drone_state, i)
+        self._compute_observations(np.zeros((self.num_envs, 4), dtype=np.float32), drone_state, i)
 
         return self._obs.copy()
 
@@ -188,16 +195,15 @@ class DroneEnv(VecEnv):
         self._obs[i, 3:12] = R.reshape(-1, 9).numpy()[i]
         self._obs[i, 12:15] = lin_vel.numpy()[i]
         self._obs[i, 15:18] = ang_vel.numpy()[i]
-        self._obs[i, 18:22] = self._prev_action[i]
+        self._obs[i, 18:22] = action[i]
                 
         ### update all grid-based observations
         for j in i:
             c, g = self._cameras[j], self._grids[j]
             xyz, R = self._drone_pos[j], self._obs[j, 3:12].reshape(3,3)
-            vis = c.visible(xyz, R, g.obj_xy)
             
             # get top 8 obstacles based on distance
-            seen = g.obj_xy[vis]
+            seen = g.obj_xy[self._visible_objs[j]]
             order = np.argsort(np.linalg.norm(seen - xyz[:2], axis=1))[:5]
             rel = np.column_stack([seen[order] - xyz[:2], np.zeros(len(order))]) @ R
             n = len(order)
@@ -205,7 +211,7 @@ class DroneEnv(VecEnv):
             self._k_obstacles[j, n:] = 0
             
             # get top 5 lowest confidence cells, tiebreaker is dist
-            conf = np.where(g.inside_cells, g.confidence, np.inf)
+            conf = np.where(g.inside_cells, self._confs[j], np.inf)
             dist = np.hypot(g.cell_cx - xyz[0], g.cell_cy - xyz[1])
             order = np.lexsort((dist.ravel(), conf.ravel()))[:8]
             rows, cols = np.unravel_index(order, conf.shape)
@@ -214,11 +220,11 @@ class DroneEnv(VecEnv):
             cx, cy = g.cell_cx[rows, cols], g.cell_cy[rows, cols]
             rel = np.column_stack([cx - xyz[0], cy - xyz[1], np.zeros(8)])
             rel = rel @ R
-            self._k_confidence_cells[j] = np.column_stack([rel[:, :2], g.confidence[rows, cols]])
+            self._k_confidence_cells[j] = np.column_stack([rel[:, :2], self._confs[j][rows, cols]])
             
-            cur_r, cur_c = g.get_cur_cell(*self.cur_cell[j][:2])[:2]
-            done_with_it = g.confidence[cur_r, cur_c] > 0.95
-            arrived = np.linalg.norm(self._cur_cell[j][:2] - xyz[:2])
+            cur_r, cur_c = g.get_cur_cell(*self._cur_cell[j][:2])[:2]
+            done_with_it = self._confs[j][cur_r, cur_c] > 0.95
+            arrived = np.linalg.norm(self._cur_cell[j][:2] - xyz[:2]) < g.cell_size
             if done_with_it or arrived:
                 self._cur_cell[j] = np.array([cx[0], cy[0], -self.survey_alt], dtype=np.float32)
         
@@ -230,24 +236,33 @@ class DroneEnv(VecEnv):
         if i is None:
             i = np.arange(0, self.num_envs)
 
-        # concatenate
         ### step through each grid/camera, find visible objects and update certainties
         xyz_t, _, _, R_t = drone_state
         for j in i:
             c, g = self._cameras[j], self._grids[j]
             xyz, R = xyz_t[j].numpy(), R_t[j].numpy()
-            vis = c.visible(xyz, R, g.obj_xy)
-            est, rng_m = c.measure(xyz, R, g.obj_xy[vis])
+            self._visible_objs[j] = c.visible(xyz, R, g.obj_xy)
+            est, _ = c.measure(xyz, R, g.obj_xy[self._visible_objs[j]])
+            # get all detected cells
             rows, cols, valid = g.get_cur_cell(*est.T)
-            
-            # get distance of object away from camera
-            max_r = -(xyz + R @ c.offset)[2] / np.tan(np.arcsin(c.min_sin))
-            R_meas = 1 + 3 * (rng_m / max_r) ** 2
-                    
             rr, cc = rows[valid], cols[valid]
-            c_before = g.confidence[rr, cc].copy()
-            g.update_certainties(rr, cc, detected=1, noise=R_meas[valid])
-            self._info_gain[j] = (g.confidence[rr, cc] - c_before).sum()
+
+            # get all non-detected cells
+            seen = c.visible(xyz, R, g.cell_centers)
+            seen[rr * g.n_cols + cc] = True  # center falls outside frustum
+            sr, sc = np.unravel_index(np.nonzero(seen)[0], (g.n_rows, g.n_cols))
+            
+            # set z = det or not, then get distance of obj from cam and update certainties
+            det = np.zeros((g.n_rows, g.n_cols), dtype=bool)
+            det[rr, cc] = True
+            z = det[sr, sc].astype(np.float32)
+            rng_cells = np.hypot(g.cell_cx[sr, sc] - xyz[0], g.cell_cy[sr, sc] - xyz[1])
+            R_meas = 1 + 3 * (rng_cells / 20.0) ** 2
+            
+            c_before = g.confidence[sr, sc].copy()
+            g.update_certainties(sr, sc, detected=z, noise=R_meas)
+            self._confs[j] = g.confidence
+            self._info_gain[j] = (self._confs[j][sr, sc] - c_before).sum()
 
     def step_async(self, actions):
         self._async_actions = actions
@@ -280,7 +295,7 @@ class DroneEnv(VecEnv):
     @property
     def drone_pos(self):
         return self._drone_pos.copy()
-
+    
 if __name__ == "__main__":
     env = DroneEnv(
         init_polygon=np.array([[0,0],[30,5],[25,20],[5,15]], dtype=np.float32),

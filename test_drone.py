@@ -10,6 +10,8 @@ from glob import glob
 from environment.env import DroneEnv
 from drone.drone_logger import DroneLogger
 
+import matplotlib.pyplot as plt
+
 def get_args():
     parser = argparse.ArgumentParser()
 
@@ -45,6 +47,17 @@ def run_rollouts(model, env, save_path: Path, n_rollouts: int = 10):
         print(f"Episode ended: step={ep_len}. rew={total_rew.item()}\n\n")
         print(f"Reason for termination: {infos[0]['termination_reason']}")
         print(f"Final obs: {infos[0]['terminal_observation']}")
+        
+        if done[0]:
+            g = env.venv._grids[0]
+            xe = g.xmin + np.arange(g.n_cols + 1) * g.cell_size
+            ye = g.ymin + np.arange(g.n_rows + 1) * g.cell_size
+            plt.figure()
+            plt.pcolormesh(xe, ye, infos[0]["terminal_confidence"], vmin=0, vmax=1)
+            plt.colorbar(label="confidence (1-P)")
+            plt.fill(*g.polygon.T, fill=False, edgecolor="k")
+            plt.savefig(f"{save_path}/conf_map_{n_roll:03d}.jpg", dpi=150)
+            plt.close()
 
 
 def main():
@@ -60,7 +73,14 @@ def main():
     save_path.mkdir(parents=True, exist_ok=True)
 
     ### run inference using loaded env, model and gather stats ###
-    env = VecNormalize.load(wn_path, DroneEnv(1))
+    env = VecNormalize.load(
+        wn_path, 
+        DroneEnv(
+            init_polygon=np.array([[0,0],[58,8],[52,42],[6,34]], dtype=np.float32), 
+            num_envs=1, 
+            num_objs=40
+        )
+    )
     env.training = False
     env.norm_reward = False
     model = PPO.load(w_path, env=env)
@@ -72,6 +92,6 @@ def main():
     logger = DroneLogger(sim_dt=env.sim_dt, save_path=save_path)
     logger.load_data(data, data_keys)
     logger.log_trajectories()
-
+    
 if __name__ == "__main__":
     main()

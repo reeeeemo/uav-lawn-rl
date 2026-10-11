@@ -8,7 +8,7 @@ import uuid
 
 from environment.env import DroneEnv
 
-TOTAL_TIMESTEPS = int(6e7)
+TOTAL_TIMESTEPS = int(3e7)
 
 def get_args():
     parser = argparse.ArgumentParser()

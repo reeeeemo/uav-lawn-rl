@@ -28,6 +28,9 @@ class Grid:
         )
         self.cell_cx = X + self.cell_size / 2
         self.cell_cy = Y + self.cell_size / 2
+        self.cell_centers = np.column_stack(
+            [self.cell_cx.ravel(), self.cell_cy.ravel()]
+        ).astype(np.float32)
 
         # generate cells, cells inside the polygon, uncertainty values #
         self.cells = np.vstack([Y.ravel(), X.ravel()])  # lower left corner of each cell
@@ -68,18 +71,19 @@ class Grid:
     def plot(self):
         """Showcase a plotted figure of grid, polygon, and placed objects w/certainty principle."""
         ### plot fishnet grid ###
+        fig, ax = plt.subplots(figsize=(4, 3))
         xe = self.xmin + np.arange(self.n_cols + 1) * self.cell_size
         ye = self.ymin + np.arange(self.n_rows + 1) * self.cell_size
         mask = self.inside_cells.ravel()
-        plt.scatter(*(self.cells[:, mask])[::-1], linewidths=0.01)
-        plt.pcolormesh(xe, ye, self.certainties, edgecolors='k', alpha=0.5)
-        plt.fill(*self.polygon.T, alpha=0.3)
+        ax.scatter(*(self.cells[:, mask])[::-1], linewidths=0.01)
+        ax.pcolormesh(xe, ye, self.certainties, edgecolors='k', alpha=0.5)
+        ax.fill(*self.polygon.T, alpha=0.3)
 
         ### scatter objects ###
         for obj_type, xy in self.objects:
             obj_color = 'green' if obj_type == 'tree' else 'red'
-            plt.plot(*xy, marker='o', color=obj_color, linestyle='none')
-        plt.show(block=True)
+            ax.plot(*xy, marker='o', color=obj_color, linestyle='none')
+        return fig
 
     @property
     def certainties(self):
