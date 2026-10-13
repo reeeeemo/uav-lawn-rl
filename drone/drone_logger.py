@@ -2,6 +2,7 @@ from matplotlib.collections import LineCollection
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import Normalize
+from matplotlib.animation import FuncAnimation, PillowWriter
 
 class DroneLogger:
     def __init__(self, sim_dt: float, save_path: str):
@@ -102,3 +103,33 @@ class DroneLogger:
 
         self._plot_xy(traj, all_speeds, norm)
         self._plot_xz(traj, all_speeds, norm)
+    
+    def log_video(self, polygon, stride=5, fps=20):
+        """Log video representation of work."""
+        # get all data
+        traj, conf = self.data.get("traj", None), self.data.get("conf", None)
+        xe, ye = self.data.get("xe", None), self.data.get("ye", None)
+        if any([i is None for i in [traj, conf, xe, ye]]):
+            return
+        traj, conf = traj[0], conf[0]
+        xe, ye = xe[0], ye[0]
+
+        # setup dot, trail, confidence mesh and bound to index grid
+        idx = range(0, len(traj), stride)
+        fig, ax = plt.subplots(figsize=(8,6))
+        mesh = ax.pcolormesh(xe, ye, conf[0], vmin=0, vmax=1)
+        ax.plot(*polygon.T, "k-", lw=1)
+        dot, = ax.plot([], [], "ro", ms=8)
+        trail, = ax.plot([], [], "r-", lw=1, alpha=0.5)
+        fig.colorbar(mesh, ax=ax, label="confidence (1-P)")
+        
+        def frame(k):
+            mesh.set_array(conf[k].ravel())
+            dot.set_data([traj[k, 0]], [traj[k, 1]])
+            trail.set_data(traj[:k, 0], traj[:k, 1])
+            ax.set_title(f"step {k}     alt {-traj[k, 2]:.1f} m")
+            return mesh, dot, trail
+        
+        anim = FuncAnimation(fig, frame, frames=idx, blit=False)
+        anim.save(f"{self.save_path}/survey.gif", writer=PillowWriter(fps=fps))
+        plt.close(fig)
