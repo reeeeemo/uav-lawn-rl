@@ -37,11 +37,11 @@ def run_rollouts(model, env, save_path: Path, n_rollouts: int = 10):
 
         ### run a rollout unti termination ###
         while not (done or (ep_len >= max_ep_len)):
-            act, _ = model.predict(obs, deterministic=True)
+            act, _ = model.predict(obs, deterministic=False)
             obs, rew ,done, infos = env.step(act)
 
             traj[ep_len] = infos[0]["terminal_global_observation"] if done[0] else env.drone_pos[0]
-            conf[ep_len] = g.confidence
+            conf[ep_len] = infos[0]["terminal_confidence"] if done[0] else g.confidence
             ep_len += 1
             total_rew += rew
 
@@ -49,12 +49,6 @@ def run_rollouts(model, env, save_path: Path, n_rollouts: int = 10):
         if done[0]:
             xe = g.xmin + np.arange(g.n_cols + 1) * g.cell_size
             ye = g.ymin + np.arange(g.n_rows + 1) * g.cell_size
-            plt.figure()
-            plt.pcolormesh(xe, ye, infos[0]["terminal_confidence"], vmin=0, vmax=1)
-            plt.colorbar(label="confidence (1-P)")
-            plt.fill(*g.polygon.T, fill=False, edgecolor="k")
-            plt.savefig(f"{save_path}/conf_map_{n_roll:03d}.jpg", dpi=150)
-            plt.close()
 
         n_save_path = str(save_path / f"rollout_{n_roll:03d}.npz")
         np.savez_compressed(n_save_path, traj = traj[:ep_len], conf = conf[:ep_len], xe=xe, ye=ye)
@@ -96,6 +90,7 @@ def main():
     logger = DroneLogger(sim_dt=env.sim_dt, save_path=save_path)
     logger.load_data(data, data_keys)
     logger.log_trajectories()
+    logger.log_conf_map(polygon=init_poly)
     logger.log_video(polygon=init_poly)
     
 if __name__ == "__main__":

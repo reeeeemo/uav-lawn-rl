@@ -105,7 +105,7 @@ class DroneLogger:
         self._plot_xz(traj, all_speeds, norm)
     
     def log_video(self, polygon, stride=5, fps=20):
-        """Log video representation of work."""
+        """Log video representation of drone navigating a polygon."""
         # get all data
         traj, conf = self.data.get("traj", None), self.data.get("conf", None)
         xe, ye = self.data.get("xe", None), self.data.get("ye", None)
@@ -118,13 +118,14 @@ class DroneLogger:
         idx = range(0, len(traj), stride)
         fig, ax = plt.subplots(figsize=(8,6))
         mesh = ax.pcolormesh(xe, ye, conf[0], vmin=0, vmax=1)
-        ax.plot(*polygon.T, "k-", lw=1)
+        ax.plot(*np.vstack([polygon, polygon[0]]).T, "k-", lw=1)
         dot, = ax.plot([], [], "ro", ms=8)
         trail, = ax.plot([], [], "r-", lw=1, alpha=0.5)
         fig.colorbar(mesh, ax=ax, label="confidence (1-P)")
         
         def frame(k):
-            mesh.set_array(conf[k].ravel())
+            """Callback per-frame to animate drone moving and confidence updating."""
+            mesh.set_array(conf[k])
             dot.set_data([traj[k, 0]], [traj[k, 1]])
             trail.set_data(traj[:k, 0], traj[:k, 1])
             ax.set_title(f"step {k}     alt {-traj[k, 2]:.1f} m")
@@ -133,3 +134,18 @@ class DroneLogger:
         anim = FuncAnimation(fig, frame, frames=idx, blit=False)
         anim.save(f"{self.save_path}/survey.gif", writer=PillowWriter(fps=fps))
         plt.close(fig)
+    
+    def log_conf_map(self, polygon):
+        """Plot a map witht all confidence levels of a cell being searched"""
+        xe, ye = self.data.get("xe", None), self.data.get("ye", None)
+        conf = self.data.get("conf", None)
+        if xe is None or ye is None or conf is None:
+            return
+        
+        for i, (x, y, cnf) in enumerate(zip(xe, ye, conf)):
+            fig, ax = plt.subplots(figsize=(8,6))
+            mesh = ax.pcolormesh(x, y, cnf[-1], vmin=0, vmax=1)
+            fig.colorbar(mesh, ax=ax, label="confidence (1-P)")
+            ax.fill(*polygon.T, fill=False, edgecolor="k")
+            plt.savefig(f"{self.save_path}/conf_map_{i}.jpg", dpi=150)
+            plt.close(fig)

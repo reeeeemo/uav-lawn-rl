@@ -62,6 +62,7 @@ class DroneEnv(VecEnv):
         self.survey_alt = 5  # altitude to stay at when surveying
         self._grids = [Grid(polygon=init_polygon) for _ in range(self.num_envs)]
         self._cur_cell = np.zeros((self.num_envs, 3), dtype=np.float32)
+        self._field_center = init_polygon.mean(axis=0).astype(np.float32)
         for i, g in enumerate(self._grids):
             g.generate_objects("tree", self.num_objs//2)
             g.generate_objects("rock", self.num_objs//2)
@@ -152,6 +153,14 @@ class DroneEnv(VecEnv):
         for k in np.where(crashed)[0]:
             self._done_reason[k] = "terminated"
             
+        # if drone flies outside from geofenced area
+        # specifically for stopping pbrs reward from flipping if it goes too far determinstically
+        d_field = np.linalg.norm(self.drone_pos[:, :2] - self._field_center, axis=1)
+        lost = (d_field > 80.0) | (self.drone_pos[:, 2] < -100.0)
+        self._done[lost] = True
+        for k in np.where(lost)[0]:
+            self._done_reason[k] = "lost"
+            
         # if all grid cells have a confidence level over 95%
         complete = np.array([(g.confidence[g.inside_cells] > 0.95).all() for g in self._grids])
         self._done[complete] = True
@@ -159,7 +168,7 @@ class DroneEnv(VecEnv):
             self._done_reason[k] = "complete"
         
         # temp reward for done and not terminated at episode length, since for hover its gonna time out.
-        self._reward[self._done & crashed] = -50.0
+        self._reward[self._done & (crashed | lost)] = -50.0
         self._reward[self._done & timeout & ~complete] = 0.0
         self._reward[self._done & complete] = 100.0
 
