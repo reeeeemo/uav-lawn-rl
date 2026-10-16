@@ -37,7 +37,7 @@ def run_rollouts(model, env, save_path: Path, n_rollouts: int = 10):
 
         ### run a rollout unti termination ###
         while not (done or (ep_len >= max_ep_len)):
-            act, _ = model.predict(obs, deterministic=False)
+            act, _ = model.predict(obs, deterministic=True)
             obs, rew ,done, infos = env.step(act)
 
             traj[ep_len] = infos[0]["terminal_global_observation"] if done[0] else env.drone_pos[0]
@@ -51,7 +51,13 @@ def run_rollouts(model, env, save_path: Path, n_rollouts: int = 10):
             ye = g.ymin + np.arange(g.n_rows + 1) * g.cell_size
 
         n_save_path = str(save_path / f"rollout_{n_roll:03d}.npz")
-        np.savez_compressed(n_save_path, traj = traj[:ep_len], conf = conf[:ep_len], xe=xe, ye=ye)
+        np.savez_compressed(
+            n_save_path, 
+            traj = traj[:ep_len], 
+            conf = conf[:ep_len], 
+            xe=xe, ye=ye,
+            obstacles = g.obj_xy
+        )
         print(f"Episode ended: step={ep_len}. rew={total_rew.item()}\n\n")
         print(f"Reason for termination: {infos[0]['termination_reason']}")
         print(f"Final obs: {infos[0]['terminal_observation']}")
@@ -85,7 +91,7 @@ def main():
     run_rollouts(model, env, save_path, n_rollouts=args.rollouts)
 
     ### plot all logged data to save path ###
-    data_keys = ["traj", "conf", "xe", "ye"]
+    data_keys = ["traj", "conf", "xe", "ye", "obstacles"]
     data = [fn for fn in glob(f"{str(save_path)}/rollout_*")]
     logger = DroneLogger(sim_dt=env.sim_dt, save_path=save_path)
     logger.load_data(data, data_keys)

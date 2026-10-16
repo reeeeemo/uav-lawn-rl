@@ -252,14 +252,15 @@ class DroneEnv(VecEnv):
             xyz, R = xyz_t[j].numpy(), R_t[j].numpy()
             self._visible_objs[j] = c.visible(xyz, R, g.obj_xy)
             est, _ = c.measure(xyz, R, g.obj_xy[self._visible_objs[j]])
-            # get all detected cells
+            # get all detected obstacle cells
             rows, cols, valid = g.get_cur_cell(*est.T)
             rr, cc = rows[valid], cols[valid]
 
-            # get all non-detected cells
+            # get all non-detected obstacle cells
             seen = c.visible(xyz, R, g.cell_centers)
-            seen[rr * g.n_cols + cc] = True  # center falls outside frustum
-            sr, sc = np.unravel_index(np.nonzero(seen)[0], (g.n_rows, g.n_cols))
+            sr, sc = g.cell_rows[seen], g.cell_cols[seen]
+            #seen[rr * g.n_cols + cc] = True  # center falls outside frustum
+            #sr, sc = np.unravel_index(np.nonzero(seen)[0], (g.n_rows, g.n_cols))
             
             # set z = det or not, then get distance of obj from cam and update certainties
             det = np.zeros((g.n_rows, g.n_cols), dtype=bool)

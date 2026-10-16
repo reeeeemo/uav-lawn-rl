@@ -26,11 +26,6 @@ class Grid:
             self.xmin + np.arange(self.n_cols) * self.cell_size,
             self.ymin + np.arange(self.n_rows) * self.cell_size, indexing='xy'
         )
-        self.cell_cx = X + self.cell_size / 2
-        self.cell_cy = Y + self.cell_size / 2
-        self.cell_centers = np.column_stack(
-            [self.cell_cx.ravel(), self.cell_cy.ravel()]
-        ).astype(np.float32)
 
         # generate cells, cells inside the polygon, uncertainty values #
         self.cells = np.vstack([Y.ravel(), X.ravel()])  # lower left corner of each cell
@@ -41,6 +36,16 @@ class Grid:
             self.polygon_path.intersects_bbox(Bbox.from_bounds(x, y, self.cell_size, self.cell_size))
             for x, y in zip(X.ravel(), Y.ravel())
         ]).reshape(self.n_rows, self.n_cols)
+        
+        rr_, cc_ = np.mgrid[0:self.n_rows, 0:self.n_cols]
+        self.cell_rows, self.cell_cols = rr_[self.inside_cells], cc_[self.inside_cells]
+        self.cell_cx = X + self.cell_size / 2
+        self.cell_cy = Y + self.cell_size / 2
+        self.cell_centers = np.column_stack([self.cell_cx[self.inside_cells], self.cell_cy[self.inside_cells]])
+#        self.cell_centers = np.column_stack(
+#            [self.cell_cx.ravel(), self.cell_cy.ravel()]
+#        ).astype(np.float32)
+        
 
     def reset(self):
         self.filter.reset()

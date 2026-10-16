@@ -109,16 +109,20 @@ class DroneLogger:
         # get all data
         traj, conf = self.data.get("traj", None), self.data.get("conf", None)
         xe, ye = self.data.get("xe", None), self.data.get("ye", None)
-        if any([i is None for i in [traj, conf, xe, ye]]):
+        obstacles = self.data.get("obstacles", None)
+
+        if any([i is None for i in [traj, conf, xe, ye, obstacles]]):
             return
         traj, conf = traj[0], conf[0]
         xe, ye = xe[0], ye[0]
+        obstacles = obstacles[0]
 
         # setup dot, trail, confidence mesh and bound to index grid
         idx = range(0, len(traj), stride)
         fig, ax = plt.subplots(figsize=(8,6))
         mesh = ax.pcolormesh(xe, ye, conf[0], vmin=0, vmax=1)
         ax.plot(*np.vstack([polygon, polygon[0]]).T, "k-", lw=1)
+        ax.scatter(obstacles[:, 0], obstacles[:, 1], c="black", edgecolors="k", s=25, linewidth=0.6, zorder=5)
         dot, = ax.plot([], [], "ro", ms=8)
         trail, = ax.plot([], [], "r-", lw=1, alpha=0.5)
         fig.colorbar(mesh, ax=ax, label="confidence (1-P)")
