@@ -187,12 +187,7 @@ class DroneEnv(VecEnv):
         )
 
     def _compute_observations(self, action: np.ndarray, drone_state: tuple, i: list[int] = None):
-        """TODO: setup observations for n amount of waypoints.
-
-        Remember it should be vision, IMU estimates that could happen too.
-
-        For a first start tho its fine.
-        """
+        """Compute observations of drone state / telemetry data."""
         if i is None:
             i = np.arange(0, self.num_envs)
 
@@ -259,8 +254,6 @@ class DroneEnv(VecEnv):
             # get all non-detected obstacle cells
             seen = c.visible(xyz, R, g.cell_centers)
             sr, sc = g.cell_rows[seen], g.cell_cols[seen]
-            #seen[rr * g.n_cols + cc] = True  # center falls outside frustum
-            #sr, sc = np.unravel_index(np.nonzero(seen)[0], (g.n_rows, g.n_cols))
             
             # set z = det or not, then get distance of obj from cam and update certainties
             det = np.zeros((g.n_rows, g.n_cols), dtype=bool)
