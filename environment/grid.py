@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 from matplotlib.path import Path
 from matplotlib.transforms import Bbox
 from utils.filter import CertaintyKalmanFilter
+from utils.perlin import PerlinNoise
 
 class Grid:
     """
@@ -27,7 +28,7 @@ class Grid:
             self.ymin + np.arange(self.n_rows) * self.cell_size, indexing='xy'
         )
 
-        # generate cells, cells inside the polygon, uncertainty values #
+        ### generate cells, cells inside the polygon, uncertainty values ###
         self.cells = np.vstack([Y.ravel(), X.ravel()])  # lower left corner of each cell
         self.filter = CertaintyKalmanFilter((self.n_rows, self.n_cols), R=0.5)
 
@@ -36,20 +37,34 @@ class Grid:
             self.polygon_path.intersects_bbox(Bbox.from_bounds(x, y, self.cell_size, self.cell_size))
             for x, y in zip(X.ravel(), Y.ravel())
         ]).reshape(self.n_rows, self.n_cols)
-        
+
+        ### heightmap variables ###
+        self.noiser = PerlinNoise(seed=5)
+        self.terrain_amp = 0
+        self.terrain_freq = 0
+        self.cell_heights = np.zeros((self.n_rows, self.n_cols))
+
+        ### generate cell centers ###
         rr_, cc_ = np.mgrid[0:self.n_rows, 0:self.n_cols]
         self.cell_rows, self.cell_cols = rr_[self.inside_cells], cc_[self.inside_cells]
-        self.cell_cx = X + self.cell_size / 2
-        self.cell_cy = Y + self.cell_size / 2
-        self.cell_centers = np.column_stack([self.cell_cx[self.inside_cells], self.cell_cy[self.inside_cells]])
-#        self.cell_centers = np.column_stack(
-#            [self.cell_cx.ravel(), self.cell_cy.ravel()]
-#        ).astype(np.float32)
+        cell_cx = X + self.cell_size / 2
+        cell_cy = Y + self.cell_size / 2
+        self.cell_centers = np.column_stack([cell_cx[self.inside_cells], cell_cy[self.inside_cells]])
+        self._all_centers = np.column_stack([cell_cx.ravel(), cell_cy.ravel()])
         
-
     def reset(self):
+        """Reset all variables and re-generate gridmap."""
         self.filter.reset()
         self.objects = []
+        self.noiser.reset(seed=np.random.randint(0, 100_000))
+        self.terrain_amp = np.random.uniform(0.0, 5.0)
+        self.terrain_freq = np.random.uniform(1/40, 1/10)
+
+        self.cell_heights = self.noiser.noise(
+            self._all_centers,
+            amplitude=self.terrain_amp,
+            frequency=self.terrain_freq,
+        ).reshape(self.n_rows, self.n_cols)
 
     def generate_objects(self, obj_type: str, num_objs: int):
         """Generates object type within the polygon boundaries."""
@@ -101,6 +116,20 @@ class Grid:
     @property
     def obj_xy(self):
         return self._obj_xy
+
+    def height(self, x, y, radius):
+        """Get maximum height of ground in a radius."""
+        r, c, _ = self.get_cur_cell(x, y)
+        r = np.clip(r, 0, self.n_rows-1)
+        c = np.clip(c, 0, self.n_cols-1)
+
+        k = int(np.ceil(radius / self.cell_size))
+        window = self.cell_heights[
+            max(r[0]-k, 0) : r[0]+k+1,
+            max(c[0]-k, 0) : c[0]+k+1
+        ]
+        return window.max()
+
 
 if __name__ == "__main__":
     grid = Grid(np.array([[0,0],[30,5],[25,20],[5,15]], dtype=np.float32))

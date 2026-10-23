@@ -6,6 +6,16 @@ import torch
 from environment.grid import Grid
 from drone.camera import Camera
 
+XY = slice(0, 2)
+ELEV = slice(2, 4)
+ROT = slice(4, 13)
+LIN_VEL = slice(13, 16)
+ANG_VEL = slice(16, 19)
+PREV_A = slice(19, 23)
+OBSTACLES = slice(23, 38)
+CELLS = slice(38, 62)
+
+
 class DroneEnv(VecEnv):
     """Custom gymnasium environment that simulates a drone.
 
@@ -15,7 +25,7 @@ class DroneEnv(VecEnv):
         self.wrapper = Drone(num_envs)
 
         ### PPO OBS / ACTION VARS ###
-        self.obs_size = 22 + 5*3 + 8*3  # 61
+        self.obs_size = 23 + 5*3 + 8*3  # 62
         self.acts_size = 4
         self.num_envs = num_envs
         self.ep_limit = 1500
@@ -59,16 +69,17 @@ class DroneEnv(VecEnv):
         self._visible_objs = np.zeros((self.num_envs, self.num_objs), dtype=bool)
 
         # setup grid environment
-        self.survey_alt = 5  # altitude to stay at when surveying
         self._grids = [Grid(polygon=init_polygon) for _ in range(self.num_envs)]
-        self._cur_cell = np.zeros((self.num_envs, 3), dtype=np.float32)
+        self._cur_cell = np.zeros((self.num_envs, 2), dtype=np.float32)
         self._field_center = init_polygon.mean(axis=0).astype(np.float32)
         for i, g in enumerate(self._grids):
             g.generate_objects("tree", self.num_objs//2)
             g.generate_objects("rock", self.num_objs//2)
-            self._cur_cell[i] = np.append(g.polygon.min(axis=0), -self.survey_alt)
+            self._cur_cell[i] = g.polygon.min(axis=0)
+        self._d_floor = np.zeros((self.num_envs,), dtype=np.float32)
 
-        self._cameras = [Camera() for _ in range(self.num_envs)]
+        self._camera = Camera()
+        self.lidar_fov = 59
         self.sim_dt = self.wrapper.dt
         self.gamma = 0.999
 
@@ -120,19 +131,28 @@ class DroneEnv(VecEnv):
             i = np.arange(0, self.num_envs)
         elif len(i) == 0:
             return
+
+        ### RESET DRONE AND STATE ###
         drone_state = self.wrapper.reset(i, randomize=True)
 
         self._prev_action[i] = 0
         self._done[i] = np.zeros_like(self._done[i])
+
+        ### RESET GRID, WORLD VARS ###
         for k in i:
             self._rewards[k] = []
-            self._cur_cell[k] = np.append(self._grids[k].polygon.min(axis=0), -self.survey_alt)
+            self._cur_cell[k] = self._grids[k].polygon.min(axis=0)
             self._grids[k].reset()
-            self._grids[k].generate_objects("tree", 25)
-            self._grids[k].generate_objects("rock", 15)
+            self._grids[k].generate_objects("tree", self.num_objs//2)
+            self._grids[k].generate_objects("rock", self.num_objs//2)
+
+            # manually set height of drone to whatever current height is of spawnpoint.
+            x, y = self.wrapper.xyz[k, :2].tolist()
+            self.wrapper.xyz[k, 2] = -(self._grids[k].height(x, y, self._grids[k].cell_size) + 0.3)
         
         self._k_obstacles[i] = 0
         self._k_confidence_cells[i] = 0
+
         self._update_detections_grid(drone_state, i)
         self._compute_observations(np.zeros((self.num_envs, 4), dtype=np.float32), drone_state, i)
 
@@ -148,7 +168,8 @@ class DroneEnv(VecEnv):
             self._done_reason[k] = "TimeLimit.truncated"
 
         # if drone hits ground (z > 0 since ned)
-        crashed = self.drone_pos[:, 2] > 0.1
+        crashed = np.zeros((self.num_envs,), dtype=bool)
+        crashed = (self._obs[:, ELEV.start] < 0.1) | (self._obs[:, ELEV.start+1] < 0.0)
         self._done[crashed] = True
         for k in np.where(crashed)[0]:
             self._done_reason[k] = "terminated"
@@ -176,13 +197,12 @@ class DroneEnv(VecEnv):
         # distance towards closest cell is merely a guideline for navigating cells
         # note that the main reward stems from maximizing certainty in a cell.
         # https://arxiv.org/pdf/2402.07411
-        dist = np.linalg.norm(self._obs[:, 0:3], axis=1)
+        dist = np.linalg.norm(self._obs[:, XY], axis=1)
         self._reward[~self._done] = (
             self._info_gain[~self._done] +
             0.1 * (self._prev_dist[~self._done] - self.gamma * dist[~self._done]) +
-            #-0.1 * np.linalg.norm(self._obs[~self._done, 0:3], axis=1)
-            -0.001 * np.linalg.norm(self._obs[~self._done, 12:15], axis=1) +
-            -0.001 * np.linalg.norm(self._obs[~self._done, 15:18], axis=1) +
+            -0.001 * np.linalg.norm(self._obs[~self._done, LIN_VEL], axis=1) +
+            -0.001 * np.linalg.norm(self._obs[~self._done, ANG_VEL], axis=1) +
             -0.01 * np.linalg.norm(action[~self._done] - self._prev_action[~self._done], axis=1)
         )
 
@@ -192,19 +212,25 @@ class DroneEnv(VecEnv):
             i = np.arange(0, self.num_envs)
 
         ### update all drone state observations ###
-        self._prev_dist[i] = np.linalg.norm(self._obs[i, 0:3], axis=1)
+        self._prev_dist[i] = np.linalg.norm(self._obs[i, XY], axis=1)
         xyz, lin_vel, ang_vel, R  = drone_state
         self._drone_pos[i] = xyz.numpy()[i]
-        self._obs[i, 0:3] = self._cur_cell[i] - self._drone_pos[i]
-        self._obs[i, 3:12] = R.reshape(-1, 9).numpy()[i]
-        self._obs[i, 12:15] = lin_vel.numpy()[i]
-        self._obs[i, 15:18] = ang_vel.numpy()[i]
-        self._obs[i, 18:22] = action[i]
+        self._obs[i, XY] = self._cur_cell[i] - self._drone_pos[i, :2]
+        self._obs[i, ROT] = R.reshape(-1, 9).numpy()[i]
+        self._obs[i, LIN_VEL] = lin_vel.numpy()[i]
+        self._obs[i, ANG_VEL] = ang_vel.numpy()[i]
+        self._obs[i, PREV_A] = action[i]
                 
         ### update all grid-based observations
         for j in i:
-            c, g = self._cameras[j], self._grids[j]
-            xyz, R = self._drone_pos[j], self._obs[j, 3:12].reshape(3,3)
+            g = self._grids[j]
+            xyz, R = self._drone_pos[j], self._obs[j, ROT].reshape(3,3)
+
+            # get maximum ground point in lidar range
+            radius = (-xyz[2]) * np.tan(np.radians(self.lidar_fov / 2))
+            self._d_floor[j] = g.height(*xyz[:2], radius)
+            agl = max(0, (-xyz[2]) - self._d_floor[j])
+            self._obs[j, ELEV] = (agl, 80.0 - agl)  # TODO: fix minimum canopy for heightmap as well 
             
             # get top 8 obstacles based on distance
             seen = g.obj_xy[self._visible_objs[j]]
@@ -215,25 +241,28 @@ class DroneEnv(VecEnv):
             self._k_obstacles[j, n:] = 0
             
             # get top 5 lowest confidence cells, tiebreaker is dist
-            conf = np.where(g.inside_cells, self._confs[j], np.inf)
-            dist = np.hypot(g.cell_cx - xyz[0], g.cell_cy - xyz[1])
-            order = np.lexsort((dist.ravel(), conf.ravel()))[:8]
-            rows, cols = np.unravel_index(order, conf.shape)
+            conf_in = self._confs[j][g.cell_rows, g.cell_cols]
+            dist = np.hypot(g.cell_centers[:, 0] - xyz[0], g.cell_centers[:, 1] - xyz[1])
+            order = np.lexsort((dist, conf_in))[:8]
+            rows, cols = g.cell_rows[order], g.cell_cols[order]
+            cx, cy = g.cell_centers[order].T
 
             # stack sorted cell rows/cols and put them into drone-relative frames (forward, right)
-            cx, cy = g.cell_cx[rows, cols], g.cell_cy[rows, cols]
             rel = np.column_stack([cx - xyz[0], cy - xyz[1], np.zeros(8)])
             rel = rel @ R
             self._k_confidence_cells[j] = np.column_stack([rel[:, :2], self._confs[j][rows, cols]])
-            
-            cur_r, cur_c = g.get_cur_cell(*self._cur_cell[j][:2])[:2]
+
+            ### get current cell, switch if high-confidence or already at the node to nearest low-conf one ###
+            cur_r, cur_c, _ = g.get_cur_cell(*self._cur_cell[j])
             done_with_it = self._confs[j][cur_r, cur_c] > 0.95
-            arrived = np.linalg.norm(self._cur_cell[j][:2] - xyz[:2]) < g.cell_size
+            arrived = np.linalg.norm(self._cur_cell[j] - xyz[:2]) < g.cell_size
             if done_with_it or arrived:
-                self._cur_cell[j] = np.array([cx[0], cy[0], -self.survey_alt], dtype=np.float32)
+                self._cur_cell[j] = np.array([cx[0], cy[0]], dtype=np.float32)
+                self._obs[j, XY] = self._cur_cell[j] - self._drone_pos[j][:2]
+                self._prev_dist[j] = np.linalg.norm(self._obs[j, XY])
         
-        self._obs[i, 22:37] = self._k_obstacles[i].reshape(len(i), -1)
-        self._obs[i, 37:61] = self._k_confidence_cells[i].reshape(len(i), -1)
+        self._obs[i, OBSTACLES] = self._k_obstacles[i].reshape(len(i), -1)
+        self._obs[i, CELLS] = self._k_confidence_cells[i].reshape(len(i), -1)
         
     def _update_detections_grid(self, drone_state, i: list[int] = None):
         """Update grid certainty levels with any detected objects in camera's frustum."""
@@ -243,23 +272,25 @@ class DroneEnv(VecEnv):
         ### step through each grid/camera, find visible objects and update certainties
         xyz_t, _, _, R_t = drone_state
         for j in i:
-            c, g = self._cameras[j], self._grids[j]
+            g = self._grids[j]
             xyz, R = xyz_t[j].numpy(), R_t[j].numpy()
-            self._visible_objs[j] = c.visible(xyz, R, g.obj_xy)
-            est, _ = c.measure(xyz, R, g.obj_xy[self._visible_objs[j]])
+            self._visible_objs[j] = self._camera.visible(xyz, R, g.obj_xy)
+            est, _ = self._camera.measure(xyz, R, g.obj_xy[self._visible_objs[j]])
             # get all detected obstacle cells
             rows, cols, valid = g.get_cur_cell(*est.T)
             rr, cc = rows[valid], cols[valid]
 
             # get all non-detected obstacle cells
-            seen = c.visible(xyz, R, g.cell_centers)
+            seen = self._camera.visible(xyz, R, g.cell_centers)
             sr, sc = g.cell_rows[seen], g.cell_cols[seen]
             
             # set z = det or not, then get distance of obj from cam and update certainties
             det = np.zeros((g.n_rows, g.n_cols), dtype=bool)
             det[rr, cc] = True
             z = det[sr, sc].astype(np.float32)
-            rng_cells = np.hypot(g.cell_cx[sr, sc] - xyz[0], g.cell_cy[sr, sc] - xyz[1])
+            rng_cells = np.linalg.norm(
+                np.column_stack([g.cell_centers[seen], -g.cell_heights[sr, sc]]) - xyz, axis=1
+            )
             R_meas = 1 + 3 * (rng_cells / 20.0) ** 2
             
             c_before = g.confidence[sr, sc].copy()
